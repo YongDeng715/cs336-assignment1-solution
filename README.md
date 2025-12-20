@@ -30,6 +30,8 @@ Initially, all tests should fail with `NotImplementedError`s.
 To connect your implementation to the tests, complete the
 functions in [./tests/adapters.py](./tests/adapters.py).
 
+现在在该仓库中已经补充完毕，原来文件另存为 `./tests/adapters_copy.py`。
+
 ### Download data
 Download the TinyStories data and a subsample of OpenWebText
 
@@ -46,5 +48,28 @@ wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_
 gunzip owt_valid.txt.gz
 
 cd ..
+```
+
+使用国内网络镜像下载的命令
+
+```sh
+### source: https://github.com/stanford-cs336/assignment1-basics
+
+# echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.bashrc
+# source ~/.bashrc
+
+mkdir -p data
+cd data
+
+wget https://hf-mirror.com/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt
+wget https://hf-mirror.com/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt
+
+wget https://hf-mirror.com/datasets/stanford-cs336/owt-sample/resolve/main/owt_train.txt.gz
+gunzip owt_train.txt.gz
+
+wget https://hf-mirror.com/datasets/stanford-cs336/owt-sample/resolve/main/owt_valid.txt.gz
+gunzip owt_valid.txt.gz
+
+cd .. 
 ```
 
