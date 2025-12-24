@@ -2,7 +2,7 @@ import json
 import os
 import time
 import regex as re
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import BinaryIO, Optional
 from multiprocessing import Pool
 from concurrent.futures import ProcessPoolExecutor
@@ -180,6 +180,7 @@ def train_bpe(
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
             chunk_list.append(chunk)
+            del chunk  # free memory
     task_args = [(chunk, special_tokens, False) for chunk in chunk_list]
     
     with Pool(processes=num_workers) as pool:
@@ -379,5 +380,5 @@ def test():
     print(f"tiktoken encoded: {ids}, decoded: {decoded}")
 
 if __name__ == "__main__":
-    main()
+    # main()
     test()
