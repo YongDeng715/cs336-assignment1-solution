@@ -10,7 +10,7 @@ from cs336_basics.bpe_tokenizer import BPETokenizer, train_bpe
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-
+#%% Transformer LM Architecture
 def run_linear(
     d_in: int,
     d_out: int,
@@ -29,8 +29,9 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    # 使用torch.matmul执行线性变换: y = xW^T
+    # 其中in_features的形状是(..., d_in),weights.T的形状是(d_in, d_out)
+    return in_features @ weights.T
 
 
 def run_embedding(
@@ -52,7 +53,7 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    return weights[token_ids]
 
 
 def run_swiglu(
@@ -84,7 +85,18 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+
+    # step1:将输入in_features投影到高维度,作为上采样
+    value = in_features@w1_weight.T  # 形状: [..., d_ff]
+    # step2:将输入in_features投影到高维度,作为门控信号
+    gate = in_features@w3_weight.T  # 形状: [..., d_ff]
+    # step3:对value应用swish激活函数
+    swish_value = value * torch.sigmoid(value)  # 形状: [..., d_ff]
+    # step4:门控激活 (Swish(xW₁) ⊙ (xW₃))
+    GLU = swish_value * gate  # 形状: [..., d_ff]
+    # step5:下采样回原始维度
+    output = GLU@w2_weight.T  # 形状: [..., d_model]
+    return output
 
 
 def run_scaled_dot_product_attention(
@@ -105,7 +117,21 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    # step1: calculate attention scores
+    attnScores = Q @ K.transpose(-2,-1)
+
+    #step2: normalize
+    d_k=Q.shape[-1]
+    attnScores = attnScores / torch.sqrt(torch.tensor(d_k, dtype=attnScores.dtype))
+
+    #step3: apply mask
+    if mask is not None:
+        attnScores = attnScores.masked_fill(~mask, -1e9)
+        
+    #step4: softmax and output
+    softmaxAttnScores=torch.softmax(attnScores,dim=-1)
+    ans = softmaxAttnScores @ V
+    return ans
 
 
 def run_multihead_self_attention(
@@ -139,7 +165,88 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    print(f"\nd_model: {d_model}, num_heads: {num_heads}")
+    print(f"q_proj_weight: {q_proj_weight.shape}")
+    print(f"k_proj_weight: {k_proj_weight.shape}")
+    print(f"v_proj_weight: {v_proj_weight.shape}")
+    print(f"o_proj_weight:{o_proj_weight.shape}")
+    print(f"in_features:{in_features.shape}")
+
+    """
+    tests/test_model.py::test_multihead_self_attention 
+    num_heads: 4, d_k_per_head: 16，d_model: 64, 
+    q_proj_weight: torch.Size([64, 64])
+    k_proj_weight: torch.Size([64, 64])
+    v_proj_weight: torch.Size([64, 64])
+    o_proj_weight:torch.Size([64, 64])
+    in_features:torch.Size([4, 12, 64])
+
+    第一个64:d_k - 每个头的查询/键维度
+    第二个64:d_in - 输入特征维度
+    关键理解:虽然 q_proj_weight 形状是 [64, 64],但这实际上是所有头的投影权重合并在一起。因为 num_heads = 4,所以:
+    每个头的实际维度:d_k_per_head = 64 / 4 = 16
+    总投影权重大小:d_k = 16 x 4 = 64
+
+    2. 输入特征形状:[4, 12, 64]
+    in_features: torch.Size([4, 12, 64])
+    第一个4:batch_size - 批次大小(4个样本)
+    第二个12:sequence_length - 序列长度(12个token)
+    第三个64:d_in - 输入特征维度(与投影权重的第二个维度匹配）
+
+    1. q_proj_weight - 投影权重矩阵
+    类型：权重参数（可训练的参数）
+    作用：将输入特征映射到查询向量：用于将输入特征转换为查询向量
+    形状：[d_k, d_in]（输出维度 × 输入维度）
+    2. Q 向量 - 查询向量
+    类型：计算得到的张量
+    作用：实际的查询向量，用于注意力计算
+    形状：[batch_size, seq_len, d_k]
+    """
+    batch_size, seq_len, d_in = in_features.shape
+    d_q = q_proj_weight.shape[0]
+    d_k = k_proj_weight.shape[0]
+    d_v = v_proj_weight.shape[0]
+
+    d_q_per_head = d_q // num_heads
+    d_k_per_head = d_k // num_heads
+    d_v_per_head = d_v // num_heads
+
+    #step1:calcluate Q,K,V
+    Q = run_linear(d_in=d_in, d_out=d_k, weights=q_proj_weight, in_features=in_features) #4,12,64
+    K = run_linear(d_in=d_in, d_out=d_k, weights=k_proj_weight, in_features=in_features)
+    V = in_features @ v_proj_weight.T
+
+    #step2:reshape
+    Q = Q.view(batch_size, seq_len, num_heads, d_k_per_head)#4,12,4,16
+    K = K.view(batch_size, seq_len, num_heads, d_k_per_head)#4,12,4,16
+    V = V.view(batch_size, seq_len, num_heads, d_v_per_head)#4,12,4,16
+
+    #step3:Transformer standard format of Q,K,V
+    Q = Q.transpose(1,2)#4,4,12,16
+    K = K.transpose(1,2)
+    V = V.transpose(1,2)
+
+    #step4:attention scores
+    attnScores = Q @ K.transpose(-2,-1)
+    #step5:scale and mask
+    attnScores = attnScores/torch.sqrt(torch.tensor(d_k_per_head, dtype=attnScores.dtype))
+    mask = torch.tril(torch.ones(seq_len, seq_len, device=attnScores.device)).bool()
+    attnScores = attnScores.masked_fill(mask == 0, float('-inf'))
+
+    #step6:softmax and output
+    softmaxAttnScores = torch.softmax(attnScores, dim=-1)
+    tmp_output = softmaxAttnScores @ V
+
+    # step7: 合并多头输出
+    # 当前形状: [batch_size, num_heads, seq_len, d_v_per_head] → 目标形状: [batch_size, seq_len, d_v]
+
+    output = tmp_output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_v)
+    #print(f"合并多头输出之后output.shape={output.shape}")
+
+    # step8: 投影到输出维度
+    output = output @ o_proj_weight.T
+    #print(f"投影到输出维度之后output.shape={output.shape}")
+    return output
 
 
 def run_multihead_self_attention_with_rope(
@@ -201,7 +308,49 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    #step1:确认嵌入维度是偶数
+    d_k = in_query_or_key.shape[-1]
+    seq_len = in_query_or_key.shape[-2]
+    if d_k % 2 != 0:
+        raise ValueError("d_k must be even for RoPE")
+    
+    #step2:确认旋转角度theta, 频率计算: θ^(-2i/d_k) 
+    i = torch.arange(0, d_k//2, dtype=torch.float32, device=in_query_or_key.device)
+    freqs = theta ** (-2 * i / d_k)  # 形状 [d_k//2]
+
+    # step3:扩展 freqs 以匹配最大序列长度
+    freqs = freqs.unsqueeze(0).expand(max_seq_len, -1)  # (max_seq_len, d_k // 2)
+    
+    # step4:创建位置索引
+    positions = torch.arange(max_seq_len).unsqueeze(1)          # (max_seq_len, 1)
+    
+    """
+    角度计算: 位置 x 频率
+    Token "I" (位置0): [0x1.0=0°, 0x0.01=0°]
+    Token "love" (位置1): [1x1.0=1°, 1x0.01=0.01°]  
+    Token "apple" (位置2): [2x1.0=2°, 2x0.01=0.02°]
+    """
+    # step5: 计算角度 (向量化操作)
+    angles = positions * freqs  # 广播：形状 [*batch_dims, seq_len, d_k//2]
+
+    #step6:创建旋转矩阵
+    cos_emb = torch.cos(angles)
+    sin_emb = torch.sin(angles)
+    cos_emb, sin_emb = cos_emb[:seq_len], sin_emb[:seq_len]
+
+    #step7:x转换成复数
+    x_even = in_query_or_key[..., ::2]
+    x_odd = in_query_or_key[..., 1::2]
+
+    #step8:计算旋转
+    rotated_even = x_even * cos_emb - x_odd * sin_emb
+    rotated_odd = x_even * sin_emb + x_odd * cos_emb
+
+    # step9:重新组合维度
+    result = torch.zeros_like(in_query_or_key)
+    result[..., ::2] = rotated_even
+    result[..., 1::2] = rotated_odd
+    return result
 
 
 def run_transformer_block(
@@ -274,7 +423,46 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+
+    # 输入 → RMSNorm → 多头自注意力 → 残差连接 → RMSNorm → 前馈网络 → 残差连接 → 输出
+    batch_size, seq_len, d_model = in_features.shape
+
+    #step1:第一个RMSNorm
+    in_feat_1stRMSNorm=run_rmsnorm(d_model=d_model, eps=1e-5, weights=weights['ln1.weight'], in_features=in_features)
+
+    #step2:多头注意力
+    token_positions = torch.arange(seq_len).expand(batch_size,-1)
+    MHA = run_multihead_self_attention_with_rope(
+        d_model=d_model,
+        num_heads=num_heads,
+        max_seq_len=seq_len,
+        theta=theta,
+        q_proj_weight=weights["attn.q_proj.weight"],
+        k_proj_weight=weights["attn.k_proj.weight"],
+        v_proj_weight=weights["attn.v_proj.weight"],
+        o_proj_weight=weights["attn.output_proj.weight"],
+        in_features=in_feat_1stRMSNorm,
+        token_positions=token_positions
+    )
+    
+    #step3:第一个残差连接
+    MHA_fristResidual = in_features + MHA
+
+    #step4:第二个RMSNorm
+    MHA_1stResidual = run_rmsnorm(d_model=d_model,
+                                eps=1e-5,
+                                weights=weights['ln2.weight'],
+                                in_features=MHA_fristResidual)
+    
+    #step5:前馈网络
+    FFN = run_swiglu(d_model=d_model,
+                    d_ff=d_ff,
+                    w1_weight=weights['ffn.w1.weight'],
+                    w2_weight=weights['ffn.w2.weight'],
+                    w3_weight=weights['ffn.w3.weight'],
+                    in_features=MHA_1stResidual)
+    
+    return MHA_1stResidual + FFN
 
 
 def run_transformer_lm(
@@ -356,7 +544,31 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    #step1:获取token_embeddings, 即将token转换为embedding之后的向量
+    token_embeddings = run_embedding(vocab_size, d_model, weights['token_embeddings.weight'], in_indices) #[batch_size,sequence_length,d_model]=[4,12,64]
+    batch_size, seq_len, d_model = token_embeddings.shape
+    #step2:构建多层transformer block，将embedding之后的token输入transformer block
+    for layer_idx in range(num_layers):
+        #构建当前层的权重字典
+        layer_weights={
+        'attn.q_proj.weight':weights[f'layers.{layer_idx}.attn.q_proj.weight'],
+        'attn.k_proj.weight':weights[f'layers.{layer_idx}.attn.k_proj.weight'],
+        'attn.v_proj.weight':weights[f'layers.{layer_idx}.attn.v_proj.weight'],
+        'attn.output_proj.weight':weights[f'layers.{layer_idx}.attn.output_proj.weight'],
+        'ln1.weight':weights[f'layers.{layer_idx}.ln1.weight'],
+        'ffn.w1.weight':weights[f'layers.{layer_idx}.ffn.w1.weight'],
+        'ffn.w2.weight':weights[f'layers.{layer_idx}.ffn.w2.weight'],
+        'ffn.w3.weight':weights[f'layers.{layer_idx}.ffn.w3.weight'],
+        'ln2.weight':weights[f'layers.{layer_idx}.ln2.weight'],
+        }
+        # 注意这里将当前层的输出赋值给token_embeddings，作为下一层的输入，因为左边只能是token_embeddings
+        token_embeddings = run_transformer_block(d_model,num_heads,d_ff,context_length,rope_theta,layer_weights,token_embeddings)
+
+    #step3:将多层transformer输出通过RMSNorm
+    final_output = run_rmsnorm(d_model=d_model,eps=1e-5,weights=weights['ln_final.weight'],in_features=token_embeddings)
+    logits = run_linear(d_in=d_model,d_out=vocab_size,weights=weights['lm_head.weight'],in_features=final_output) #[batch_size, sequence_length, vocab_size]=[4,12,10000]
+
+    return logits
 
 
 def run_rmsnorm(
@@ -379,7 +591,19 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    output=in_features.clone()
+    
+    for i in range(in_features.shape[0]):   # each batch
+
+        for j in range(in_features.shape[1]):   # each token
+            #step1:计算均方根rms
+            token_feature=in_features[i][j][:]
+            token_feature_squared=token_feature**2
+            mean_token_feature_squared=torch.mean(token_feature_squared)
+            rms=torch.sqrt(mean_token_feature_squared+eps)
+            #step2:归一化
+            output[i][j][:]=(in_features[i][j][:]/rms)*weights
+    return output
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -393,9 +617,11 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    output = in_features * torch.sigmoid(in_features)
+    return output
 
 
+#%% Transformer LM Training 
 def run_get_batch(
     dataset: npt.NDArray, batch_size: int, context_length: int, device: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -432,7 +658,17 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    print(f"\nin_features.shape={in_features.shape}") #[3,5]
+
+    #step1:计算每行最大值
+    max_values = torch.max(in_features, dim=dim, keepdim=True)[0]
+    print(f"max_values.shape={max_values.shape}") #[3,1]
+    #step2:减去最大值
+    exp_vals = torch.exp(in_features - max_values)
+    #step3:计算softmax
+    softmax_vals = exp_vals / torch.sum(exp_vals, dim=dim, keepdim=True)
+    return softmax_vals
+    #return torch.softmax(in_features, dim=dim)
 
 
 def run_cross_entropy(
@@ -500,6 +736,7 @@ def run_get_lr_cosine_schedule(
     raise NotImplementedError
 
 
+# %% BPE Tokenizer
 def run_save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,

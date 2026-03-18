@@ -309,9 +309,6 @@ class TransformerLM(nn.Module):
         # out = self.softmax(out, dim=-1)
         return out
         
-    
-        
-        
-        
+
 
             
